@@ -167,3 +167,51 @@ WHERE
 -- Grant read access to the view for authenticated (and optionally anon) users.
 GRANT SELECT ON public.public_trades_leaderboard TO authenticated;
 GRANT SELECT ON public.public_trades_leaderboard TO anon;
+
+-- ============================================================================
+-- SOCIAL GRAPH (Followers/Following)
+-- ============================================================================
+
+CREATE TABLE public.follows (
+    follower_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    following_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    PRIMARY KEY (follower_id, following_id)
+);
+
+-- Prevent user from following themselves
+ALTER TABLE public.follows ADD CONSTRAINT no_self_follow CHECK (follower_id != following_id);
+
+ALTER TABLE public.follows ENABLE ROW LEVEL SECURITY;
+
+-- Follows RLS
+CREATE POLICY "Public follows are viewable by everyone." 
+ON public.follows FOR SELECT USING (true);
+
+CREATE POLICY "Users can follow others." 
+ON public.follows FOR INSERT WITH CHECK (auth.uid() = follower_id);
+
+CREATE POLICY "Users can unfollow others." 
+ON public.follows FOR DELETE USING (auth.uid() = follower_id);
+
+-- ============================================================================
+-- AUTH AUTOMATION TRIGGER
+-- ============================================================================
+-- Automatically creates a public.profiles row when a new user signs up via Supabase Auth
+
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, username, avatar_url)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'username', 'user_' || substr(NEW.id::text, 1, 8)),
+    NEW.raw_user_meta_data->>'avatar_url'
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
